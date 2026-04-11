@@ -120,7 +120,7 @@ string get_tier_from_api(string handle)
     }
     catch (...)
     {
-        return "Not Found";
+        return "솔브닥 미연동";
     }
 }
 
@@ -254,6 +254,103 @@ void register_students()
     save_data_to_db(s);
 }
 
+// 👇 1. 디스코드 전송용으로 문제 추천 결과를 "문자열"로 만들어주는 함수입니다.
+string get_recommendation_string(string handle)
+{
+    string result = "\n**[오늘의 맞춤 추천 문제]**\n";
+    string url = "https://solved.ac/api/v3/search/problem?query=solved_by%3A" + handle + "&sort=level&direction=desc";
+
+    try
+    {
+        auto data = json::parse(call_api(url));
+        if (data["count"] == 0)
+        {
+            return result + "푼 문제가 없어 추천이 불가능합니다.\n";
+        }
+
+        int total_solved = data["count"];
+        int target_rank = min(total_solved - 1, 10);
+        int page = (target_rank / 20) + 1;
+        int item_idx = target_rank % 20;
+
+        string paged_url = url + "&page=" + to_string(page);
+        auto paged_data = json::parse(call_api(paged_url));
+
+        if (paged_data["items"].size() <= (size_t)item_idx)
+        {
+            item_idx = (int)paged_data["items"].size() - 1;
+        }
+
+        int median_level = paged_data["items"][item_idx]["level"];
+        result += "주력 구간: **" + convert_tier(median_level) + "**\n";
+
+        string rec_url = "https://solved.ac/api/v3/search/problem?query=tier%3A" + to_string(median_level) + "%20-solved_by%3A" + handle;
+        auto rec_data = json::parse(call_api(rec_url));
+        auto& items = rec_data["items"];
+
+        if (items.empty())
+        {
+            median_level++;
+        }
+
+        vector<int> indices(items.size());
+        iota(indices.begin(), indices.end(), 0);
+        shuffle(indices.begin(), indices.end(), mt19937{ random_device{}() });
+
+        // 디스코드 채팅창 가독성을 위해 5문제만 뽑아서 문자열로 조립합니다.
+        for (int i = 0; i < min(5, (int)items.size()); ++i)
+        {
+            auto& prob = items[indices[i]];
+            result += "[" + to_string((int)prob["problemId"]) + "] " + (string)prob["titleKo"] + " (" + convert_tier(prob["level"]) + ")\n";
+        }
+    }
+    catch (...)
+    {
+        return result + "문제 분석 중 오류 발생.\n";
+    }
+    return result;
+}
+
+// 👇 2. 조립된 학생 정보와 추천 문제를 디스코드로 쏘는 함수입니다.
+void send_discord_profile_and_rec(const stu& s, string rec_str)
+{
+    // 승훈님의 웹훅 URL
+    string webhook_url = "https://discordapp.com/api/webhooks/1491991296242487360/k5tDO-4atCmI3rWn9Bbi_6G-xZwArWlnAqzQSZT0YyJluZsycGURfwMcq7GTE9otCl0D";
+
+    // 디스코드에 보낼 메시지를 마크다운 형식으로 예쁘게 조립합니다.
+    string message = "**[O(1) 부원 정보 조회]**\n";
+    message += "**이름:** " + s.name + " (" + to_string(s.student_id) + ")\n";
+    message += "**티어:** " + s.solved_ac_tier + "\n";
+    message += "**백준 프로필:** https://solved.ac/profile/" + s.baekjoon_id + "\n";
+    message += rec_str; // 위에서 만든 추천 문제 문자열을 갖다 붙입니다.
+
+    json j = { {"content", message} };
+    string post_data = j.dump();
+
+    CURL* curl;
+    CURLcode res;
+    string readBuffer;
+
+    curl = curl_easy_init();
+    if (curl)
+    {
+        struct curl_slist* headers = NULL;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        curl_easy_setopt(curl, CURLOPT_URL, webhook_url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "POST");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+
+        res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
+    }
+}
+
+// 👇 3. 기존 검색 함수 개조판 (위의 두 함수를 활용합니다)
 void search_students()
 {
     int id;
@@ -262,14 +359,29 @@ void search_students()
     {
         stu& s = students_map[id];
         cout << "--- " << s.name << " 학생 정보 ---\n";
-        //cout << "ID: " << s.student_id << " | 성별: " << s.gender << "\n";
         cout << "ID: " << s.student_id << "\n" << "이름: " << s.name << "\n";
         cout << "나이: " << s.age << "\n" << "성별: " << s.gender << "\n";
         cout << "백준: " << s.baekjoon_id << " (" << s.solved_ac_tier << ")\n";
 
         cout << "\n문제를 추천받으시겠습니까? (1: Yes, 0: No): ";
         int rec; cin >> rec;
-        if (rec == 1) recommend_problems(s.baekjoon_id);
+
+        string rec_str = ""; // 추천 문제 결과를 담을 빈 문자열
+        if (rec == 1)
+        {
+            recommend_problems(s.baekjoon_id); // 콘솔에 기존처럼 출력
+            rec_str = get_recommendation_string(s.baekjoon_id); // 디스코드 전송을 위해 문자열로도 저장
+        }
+
+        // 디스코드 전송 여부 묻기
+        cout << "\n이 정보와 추천 문제를 디스코드로 전송하시겠습니까? (1: Yes, 0: No): ";
+        int send_discord; cin >> send_discord;
+        if (send_discord == 1)
+        {
+            cout << "디스코드로 전송 중...\n";
+            send_discord_profile_and_rec(s, rec_str);
+            cout << "전송 완료!\n";
+        }
     }
     else
     {
@@ -535,9 +647,16 @@ void update_all_tiers()
 
 
 // 👇 1. 점수 계산 함수가 제일 먼저 와야 합니다. (함수 밖으로 빼냄!)
+// 👇 1. 점수 계산 함수 (미연동자 꼴찌 처리 완벽 적용!)
 int get_tier_score(string tier_str)
 {
-    if (tier_str == "Unrated" || tier_str == "Unknown" || tier_str == "Not Found")
+    // 미연동자는 괘씸죄를 적용하여 -1점(가장 밑바닥)으로 보냅니다.
+    if (tier_str == "솔브닥 미연동" || tier_str == "Unknown" || tier_str == "Not Found")
+    {
+        return -1;
+    }
+    // 연동은 했지만 아직 문제를 안 푼 사람은 0점
+    if (tier_str == "Unrated")
     {
         return 0;
     }
@@ -548,7 +667,7 @@ int get_tier_score(string tier_str)
 
     stringstream ss(tier_str);
     string color;
-    int rank;
+    int rank = 5; // 혹시 숫자를 못 읽을 경우를 대비해 기본값 5(최하위)로 설정
 
     ss >> color >> rank;
 
@@ -560,6 +679,7 @@ int get_tier_score(string tier_str)
     else if (color == "Diamond") base = 20;
     else if (color == "Ruby") base = 25;
 
+    // 백준은 1이 가장 높고 5가 가장 낮으므로, (6 - rank)를 더해줍니다.
     return base + (6 - rank);
 }
 
