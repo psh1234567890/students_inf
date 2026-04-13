@@ -44,7 +44,9 @@ string call_api(string url)
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+        //curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+        // 크롬 브라우저인 척 위장하기!
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
         res = curl_easy_perform(curl);
         curl_easy_cleanup(curl);
     }
@@ -632,6 +634,7 @@ void update_all_tiers()
         {
             cout << "조회 실패.\n";
         }
+        Sleep(500);
     }
 
     if (count > 0)
