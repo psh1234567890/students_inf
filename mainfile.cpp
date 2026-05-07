@@ -11,6 +11,7 @@
 #include <curl/curl.h>
 #include <sstream>
 #include <regex>
+#include <windows.h>
 
 using namespace std;
 using json = nlohmann::json;
@@ -42,19 +43,36 @@ string call_api(string url)
     CURLcode res;
     string readBuffer;
     curl = curl_easy_init();
+
     if (curl)
     {
+        struct curl_slist* headers = NULL;
+        // Node.js(axios)가 쓰는 것과 토씨 하나 안 틀리고 똑같은 헤더 세팅
+        headers = curl_slist_append(headers, "Accept: application/json, text/plain, */*");
+        headers = curl_slist_append(headers, "Connection: keep-alive");
+
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
-        // 👇 VS2022 환경의 깐깐한 HTTPS 인증서 검사 무력화 (정올 뚫기 핵심!)
+        // Node.js에서 프리패스로 통과했던 바로 그 이름표!
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "O(1)_Club_Bot/2.0 (Contact: SeungHoon)");
+
+        // 압축 해제 (CF 통과 필수)
+        curl_easy_setopt(curl, CURLOPT_ENCODING, "");
+
+        // ✨ [최종 필살기] 클라우드플레어가 봇을 거르는 핵심 기준인 HTTP/1.1을 버리고 HTTP/2로 강제 접속! ✨
+        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
+
+        // HTTPS 인증서 우회
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
         res = curl_easy_perform(curl);
+
+        curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
     }
     return readBuffer;
@@ -167,7 +185,20 @@ void recommend_problems(string handle)
 {
     cout << "\n[백준 데이터 기반 맞춤 문제 분석 중...]\n";
     string url = "https://solved.ac/api/v3/search/problem?query=solved_by%3A" + handle + "&sort=level&direction=desc";
+    Sleep(1000);
     string response = call_api(url);
+
+    if (response.empty() || response.front() == '<')
+    {
+        cout << "\n❌ [API 통신 차단됨] 솔브닥 방화벽이 응답을 거부했습니다!\n";
+        cout << "--- 서버 응답 미리보기 (원인 분석용) ---\n";
+        // 서버가 보낸 웹페이지의 앞부분 200글자만 잘라서 출력해 봅니다.
+        cout << response.substr(0, min(200, (int)response.length())) << "...\n";
+        cout << "------------------------------------------\n";
+        cout << "💡 팁: 1~2분 정도 기다렸다가 다시 시도해 보세요.\n";
+        return;
+    }
+    // 👆 [방어 로직 끝] 👆
 
     try
     {
@@ -185,6 +216,7 @@ void recommend_problems(string handle)
         int item_idx = target_rank % 20;
 
         string paged_url = url + "&page=" + to_string(page);
+        Sleep(1000);
         auto paged_data = json::parse(call_api(paged_url));
 
         if (paged_data["items"].size() <= (size_t)item_idx) item_idx = (int)paged_data["items"].size() - 1;
@@ -193,6 +225,7 @@ void recommend_problems(string handle)
         cout << "당신의 상위권 주력 구간(Median): " << convert_tier(median_level) << "\n";
 
         string rec_url = "https://solved.ac/api/v3/search/problem?query=tier%3A" + to_string(median_level) + "%20-solved_by%3A" + handle;
+        Sleep(1000);
         auto rec_data = json::parse(call_api(rec_url));
         auto& items = rec_data["items"];
 
@@ -285,8 +318,18 @@ string get_recommendation_string(string handle)
 
     try
     {
-        auto data = json::parse(call_api(url));
-        if (data["count"] == 0) return result + "푼 문제가 없어 추천이 불가능합니다.\n";
+        Sleep(1000); // 👈 첫 번째 API 딜레이
+        string res1 = call_api(url);
+        if (res1.empty() or res1.front() == '<')
+        {
+            return result + "방화벽 차단으로 분석 실패.\n";
+        }
+
+        auto data = json::parse(res1);
+        if (data["count"] == 0)
+        {
+            return result + "푼 문제가 없어 추천이 불가능합니다.\n";
+        }
 
         int total_solved = data["count"];
         int target_rank = min(total_solved - 1, 10);
@@ -294,18 +337,26 @@ string get_recommendation_string(string handle)
         int item_idx = target_rank % 20;
 
         string paged_url = url + "&page=" + to_string(page);
+        Sleep(1000); // 👈 두 번째 API 딜레이
         auto paged_data = json::parse(call_api(paged_url));
 
-        if (paged_data["items"].size() <= (size_t)item_idx) item_idx = (int)paged_data["items"].size() - 1;
+        if (paged_data["items"].size() <= (size_t)item_idx)
+        {
+            item_idx = (int)paged_data["items"].size() - 1;
+        }
 
         int median_level = paged_data["items"][item_idx]["level"];
         result += "주력 구간: **" + convert_tier(median_level) + "**\n";
 
         string rec_url = "https://solved.ac/api/v3/search/problem?query=tier%3A" + to_string(median_level) + "%20-solved_by%3A" + handle;
+        Sleep(1000); // 👈 세 번째 API 딜레이
         auto rec_data = json::parse(call_api(rec_url));
         auto& items = rec_data["items"];
 
-        if (items.empty()) median_level++;
+        if (items.empty())
+        {
+            median_level++;
+        }
 
         vector<int> indices(items.size());
         iota(indices.begin(), indices.end(), 0);
@@ -535,53 +586,6 @@ void send_discord_webhook(string name, string platform, string old_tier, string 
     }
 }
 
-void update_all_tiers()
-{
-    cout << "\n[전체 학생 통합 티어 갱신 시작...]\n";
-    int count = 0;
-
-    for (auto& item : students_map)
-    {
-        stu& s = item.second;
-        cout << s.name << " 조회 중... ";
-        bool changed = false;
-
-        // 백준 체크
-        string new_bj = get_tier_from_api(s.baekjoon_id);
-        if (new_bj != "Unknown" && new_bj != "솔브닥 미연동" && s.solved_ac_tier != new_bj)
-        {
-            cout << "\n  -> [백준 변동] " << s.solved_ac_tier << " -> " << new_bj;
-            send_discord_webhook(s.name, "백준", s.solved_ac_tier, new_bj);
-            s.solved_ac_tier = new_bj;
-            changed = true;
-        }
-
-        // 정올 체크 (방어 로직 포함: 기존 "Tier X"가 DB에 있으면 덮어씁니다)
-        string new_jg = get_tier_from_jungol(s.jungol_id);
-        if (new_jg != "Unknown" && new_jg != "정올 미연동/비공개" && s.jungol_tier != new_jg)
-        {
-            cout << "\n  -> [정올 변동] " << s.jungol_tier << " -> " << new_jg;
-            // 최초 변환 시 디스코드 폭탄을 막으려면 알림은 잠깐 꺼둬도 됩니다
-            // send_discord_webhook(s.name, "정올", s.jungol_tier, new_jg); 
-            s.jungol_tier = new_jg;
-            changed = true;
-        }
-
-        if (changed)
-        {
-            update_data_in_db(s);
-            count++;
-        }
-        else cout << "변동 없음.";
-
-        cout << "\n";
-        Sleep(500);
-    }
-
-    if (count > 0) cout << "\n총 " << count << "명의 티어가 갱신 및 저장되었습니다!\n";
-    else cout << "\n새롭게 변동된 티어가 없습니다.\n";
-}
-
 // 랭킹 점수 공통 로직! (이제 정올/백준 둘 다 이 함수 하나로 계산됩니다)
 int get_tier_score(string tier_str)
 {
@@ -604,7 +608,7 @@ int get_tier_score(string tier_str)
     return base + (6 - rank);
 }
 
-// 괄호 안에 있는 정올 순위 파싱 전용
+
 int get_jungol_tier_score(string tier_str, int& rank_out)
 {
     rank_out = 9999999;
@@ -633,6 +637,75 @@ int get_jungol_tier_score(string tier_str, int& rank_out)
 
     return score;
 }
+
+void update_all_tiers()
+{
+    cout << "\n[전체 학생 통합 티어 갱신 시작...]\n";
+    int count = 0;
+
+    for (auto& item : students_map)
+    {
+        stu& s = item.second;
+        cout << s.name << " 조회 중... ";
+        bool changed = false;
+
+        // 백준 체크
+        string new_bj = get_tier_from_api(s.baekjoon_id);
+        if (new_bj != "Unknown" and new_bj != "솔브닥 미연동" and s.solved_ac_tier != new_bj)
+        {
+            cout << "\n  -> [백준 변동] " << s.solved_ac_tier << " -> " << new_bj;
+            send_discord_webhook(s.name, "백준", s.solved_ac_tier, new_bj);
+            s.solved_ac_tier = new_bj;
+            changed = true;
+        }
+
+        // 정올 체크 (상승 로직 추가 완료!)
+        string new_jg = get_tier_from_jungol(s.jungol_id);
+        if (new_jg != "Unknown" and new_jg != "정올 미연동/비공개" and s.jungol_tier != new_jg)
+        {
+            cout << "\n  -> [정올 변동] " << s.jungol_tier << " -> " << new_jg;
+
+            int old_rank = 9999999, new_rank = 9999999;
+            int old_score = get_jungol_tier_score(s.jungol_tier, old_rank);
+            int new_score = get_jungol_tier_score(new_jg, new_rank);
+
+            // 티어 점수가 오르거나, 티어는 그대로인데 랭크(등수) 숫자가 작아졌을 때(상승)만 알림
+            if (new_score > old_score or (new_score == old_score and new_rank < old_rank))
+            {
+                send_discord_webhook(s.name, "정올", s.jungol_tier, new_jg);
+            }
+
+            s.jungol_tier = new_jg;
+            changed = true;
+        }
+
+        if (changed)
+        {
+            update_data_in_db(s);
+            count++;
+        }
+        else
+        {
+            cout << "변동 없음.";
+        }
+
+        cout << "\n";
+        Sleep(500);
+    }
+
+    if (count > 0)
+    {
+        cout << "\n총 " << count << "명의 티어가 갱신 및 저장되었습니다!\n";
+    }
+    else
+    {
+        cout << "\n새롭게 변동된 티어가 없습니다.\n";
+    }
+}
+
+
+// 괄호 안에 있는 정올 순위 파싱 전용
+
 
 void print_ranking()
 {
