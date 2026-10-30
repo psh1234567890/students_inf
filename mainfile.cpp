@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include <map>
 #include <string>
 #include <vector>
@@ -12,6 +12,8 @@
 #include <sstream>
 #include <regex>
 #include <windows.h>
+#include <cstdlib>
+#include <stdexcept>
 
 using namespace std;
 using json = nlohmann::json;
@@ -29,6 +31,111 @@ typedef struct Students
 } stu;
 
 map<int, stu> students_map;
+
+map<string, string> local_settings;
+
+string trim_config_value(const string& value)
+{
+    const size_t begin = value.find_first_not_of(" \t\r\n");
+    if (begin == string::npos) return "";
+
+    const size_t end = value.find_last_not_of(" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+}
+
+bool load_project_env(const wstring& directory)
+{
+    // 다른 폴더의 .env를 잘못 읽지 않도록 프로젝트 루트만 허용합니다.
+    ifstream project_file((directory + L"\\studentsinf.sln").c_str());
+    if (!project_file.is_open()) return false;
+
+    ifstream file((directory + L"\\.env").c_str());
+    if (!file.is_open()) return false;
+
+    string line;
+    bool first_line = true;
+    while (getline(file, line))
+    {
+        if (first_line && line.size() >= 3 &&
+            (unsigned char)line[0] == 0xEF &&
+            (unsigned char)line[1] == 0xBB &&
+            (unsigned char)line[2] == 0xBF)
+        {
+            line.erase(0, 3);
+        }
+        first_line = false;
+
+        line = trim_config_value(line);
+        if (line.empty() || line[0] == '#') continue;
+
+        size_t separator = line.find('=');
+        if (separator == string::npos) continue;
+
+        string key = trim_config_value(line.substr(0, separator));
+        string value = trim_config_value(line.substr(separator + 1));
+        if (value.size() >= 2 &&
+            ((value.front() == '"' && value.back() == '"') ||
+             (value.front() == '\'' && value.back() == '\'')))
+        {
+            value = value.substr(1, value.size() - 2);
+        }
+
+        if (!key.empty()) local_settings[key] = value;
+    }
+    return true;
+}
+
+bool load_env_upwards(wstring directory)
+{
+    for (int depth = 0; depth < 8; ++depth)
+    {
+        if (load_project_env(directory)) return true;
+
+        size_t slash = directory.find_last_of(L"\\/");
+        if (slash == string::npos || slash == 0) break;
+        if (slash == 2 && directory.size() >= 3 && directory[1] == L':')
+        {
+            return load_project_env(directory.substr(0, 3));
+        }
+        directory = directory.substr(0, slash);
+    }
+    return false;
+}
+
+void load_local_config()
+{
+    wchar_t buffer[MAX_PATH] = {};
+    DWORD length = GetCurrentDirectoryW(MAX_PATH, buffer);
+    if (length > 0 && length < MAX_PATH && load_env_upwards(wstring(buffer, length))) return;
+
+    length = GetModuleFileNameW(NULL, buffer, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return;
+
+    wstring executable_path(buffer, length);
+    size_t slash = executable_path.find_last_of(L"\\/");
+    if (slash != string::npos)
+    {
+        load_env_upwards(executable_path.substr(0, slash));
+    }
+}
+
+string get_required_setting(const string& key)
+{
+    const char* from_environment = getenv(key.c_str());
+    if (from_environment && from_environment[0] != '\0')
+    {
+        return string(from_environment);
+    }
+
+    auto found = local_settings.find(key);
+    if (found != local_settings.end() && !found->second.empty())
+    {
+        return found->second;
+    }
+
+    throw runtime_error("필수 설정 누락: " + key + " (.env 또는 환경 변수 확인)");
+}
+
 
 // --- [CURL & API 유틸리티] ---
 size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
@@ -84,7 +191,7 @@ string call_supabase(string url, string method, string post_data = "")
     CURLcode res;
     string readBuffer;
 
-    string anon_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl4dWtnZ29ycHFzcnd1cmJhbXh2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2NzUyOTQsImV4cCI6MjA5MTI1MTI5NH0.ypp6-CvVEgJkeZjxvJIL2pGNdx15Fift699kchB5cZk";
+    string anon_key = get_required_setting("SUPABASE_ANON_KEY");
 
     curl = curl_easy_init();
     if (curl)
@@ -320,7 +427,7 @@ string get_recommendation_string(string handle)
     {
         Sleep(1000); // 👈 첫 번째 API 딜레이
         string res1 = call_api(url);
-        if (res1.empty() or res1.front() == '<')
+        if (res1.empty() || res1.front() == '<')
         {
             return result + "방화벽 차단으로 분석 실패.\n";
         }
@@ -377,7 +484,7 @@ string get_recommendation_string(string handle)
 
 void send_discord_profile_and_rec(const stu& s, string rec_str)
 {
-    string webhook_url = "https://discordapp.com/api/webhooks/1491991296242487360/k5tDO-4atCmI3rWn9Bbi_6G-xZwArWlnAqzQSZT0YyJluZsycGURfwMcq7GTE9otCl0D";
+    string webhook_url = get_required_setting("DISCORD_WEBHOOK_PROFILE_URL");
 
     string message = "**[O(1) 부원 정보 조회]**\n";
     message += "**이름:** " + s.name + " (" + to_string(s.student_id) + ")\n";
@@ -561,7 +668,7 @@ void load_data_from_db()
 
 void send_discord_webhook(string name, string platform, string old_tier, string new_tier)
 {
-    string webhook_url = "https://discordapp.com/api/webhooks/1491991296242487360/k5tDO-4atCmI3rWn9Bbi_6G-xZwArWlnAqzQSZT0YyJluZsycGURfwMcq7GTE9otCl0D";
+    string webhook_url = get_required_setting("DISCORD_WEBHOOK_TIER_URL");
     string message = "🎉 **속보** 🎉\n[" + name + "] 학생이 **" + platform + "**에서 **" + old_tier + "** -> **" + new_tier + "**(으)로 승급했습니다!";
 
     json j = { {"content", message} };
@@ -651,7 +758,7 @@ void update_all_tiers()
 
         // 백준 체크
         string new_bj = get_tier_from_api(s.baekjoon_id);
-        if (new_bj != "Unknown" and new_bj != "솔브닥 미연동" and s.solved_ac_tier != new_bj)
+        if (new_bj != "Unknown" && new_bj != "솔브닥 미연동" && s.solved_ac_tier != new_bj)
         {
             cout << "\n  -> [백준 변동] " << s.solved_ac_tier << " -> " << new_bj;
             send_discord_webhook(s.name, "백준", s.solved_ac_tier, new_bj);
@@ -661,7 +768,7 @@ void update_all_tiers()
 
         // 정올 체크 (상승 로직 추가 완료!)
         string new_jg = get_tier_from_jungol(s.jungol_id);
-        if (new_jg != "Unknown" and new_jg != "정올 미연동/비공개" and s.jungol_tier != new_jg)
+        if (new_jg != "Unknown" && new_jg != "정올 미연동/비공개" && s.jungol_tier != new_jg)
         {
             cout << "\n  -> [정올 변동] " << s.jungol_tier << " -> " << new_jg;
 
@@ -670,7 +777,7 @@ void update_all_tiers()
             int new_score = get_jungol_tier_score(new_jg, new_rank);
 
             // 티어 점수가 오르거나, 티어는 그대로인데 랭크(등수) 숫자가 작아졌을 때(상승)만 알림
-            if (new_score > old_score or (new_score == old_score and new_rank < old_rank))
+            if (new_score > old_score || (new_score == old_score && new_rank < old_rank))
             {
                 send_discord_webhook(s.name, "정올", s.jungol_tier, new_jg);
             }
@@ -767,6 +874,18 @@ void print_all_students()
 int main()
 {
     system("chcp 65001");
+    load_local_config();
+    try
+    {
+        (void)get_required_setting("SUPABASE_ANON_KEY");
+        (void)get_required_setting("DISCORD_WEBHOOK_PROFILE_URL");
+        (void)get_required_setting("DISCORD_WEBHOOK_TIER_URL");
+    }
+    catch (const exception& e)
+    {
+        cerr << e.what() << "\n";
+        return 1;
+    }
     curl_global_init(CURL_GLOBAL_ALL);
 
     load_data_from_db();

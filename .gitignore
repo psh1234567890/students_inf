@@ -6,3 +6,8 @@ x64/
 *.ipch
 *.sdf
 *.pdb
+
+# Local secrets (never commit)
+.env
+.env.*
+!.env.example
